@@ -1,0 +1,20 @@
+<!doctype html><html lang="ja"><head><meta charset="utf-8"><title>爆走ハチ公(モニター)</title>
+<style>html,body{height:100%;margin:0;background:#000;overflow:hidden;font-family:-apple-system,"Hiragino Sans",sans-serif}
+#img{position:fixed;inset:0;width:100%;height:100%;object-fit:contain}
+#hud{position:fixed;top:16px;left:20px;color:#fff;font:800 30px 'Hiragino Sans',sans-serif;text-shadow:0 2px 6px #000}
+#think{position:fixed;top:16px;left:50%;transform:translateX(-50%);max-width:46vw;background:rgba(255,255,255,.92);color:#222;border-radius:20px;padding:12px 20px;font:800 24px 'Hiragino Sans',sans-serif;display:none}
+#center{position:fixed;inset:0;display:grid;place-items:center;pointer-events:none;text-align:center;color:#fff}
+#center div{background:rgba(0,0,0,.6);padding:24px 40px;border-radius:24px;font:800 26px/1.6 'Hiragino Sans',sans-serif}
+#center b{font-size:52px;color:#ffd23f}
+#st{position:fixed;bottom:6px;right:10px;color:#fff;opacity:.4;font-size:12px}</style></head><body>
+<img id="img"><div id="hud"></div><div id="think"></div><div id="center"></div><div id="st">Fキーで全画面</div>
+<script>
+// プレイ画面の写真を次々に表示 + 文字は同じものを重ねる
+const img=document.getElementById('img');
+function next(){const n=new Image();n.onload=()=>{img.src=n.src;setTimeout(next,30)};n.onerror=()=>setTimeout(next,500);n.src='/frame.jpg?'+Date.now()}next();
+setInterval(()=>fetch('/sync').then(r=>r.json()).then(d=>{
+ document.getElementById('hud').textContent=d.hud||'';
+ const c=document.getElementById('center');if(c.dataset.h!==(d.center||'')){c.innerHTML=d.center||'';c.dataset.h=d.center||''}
+ const th=document.getElementById('think');if(d.think){th.textContent=d.think.t;th.style.left=d.think.l;th.style.fontSize=d.think.f;th.style.display='block'}else th.style.display='none'}).catch(()=>{}),100);
+addEventListener('keydown',e=>{if(e.key==='f'||e.key==='F'){document.fullscreenElement?document.exitFullscreen():document.documentElement.requestFullscreen()}});
+</script></body></html>

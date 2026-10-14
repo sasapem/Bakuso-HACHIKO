@@ -1,0 +1,427 @@
+<!doctype html><html lang="ja"><head><meta charset="utf-8"><title>爆走ハチ公</title>
+<style>html,body{height:100%;margin:0;background:#000;overflow:hidden;font-family:-apple-system,"Hiragino Sans",sans-serif}
+#st{position:fixed;bottom:8px;right:12px;font-size:13px;color:#fff;opacity:.6}
+#hud{position:fixed;top:16px;left:20px;color:#fff;font:800 30px 'Hiragino Sans',sans-serif;text-shadow:0 2px 6px #000}
+#think{position:fixed;top:16px;left:50%;transform:translateX(-50%);max-width:46vw;transition:left .3s;background:rgba(255,255,255,.92);color:#222;border-radius:20px;padding:12px 20px;font:800 24px 'Hiragino Sans',sans-serif;display:none}
+#center{position:fixed;inset:0;display:grid;place-items:center;pointer-events:none;text-align:center;color:#fff}
+#center div{background:rgba(0,0,0,.6);padding:24px 40px;border-radius:24px;font:800 26px/1.6 'Hiragino Sans',sans-serif}
+#center b{font-size:52px;color:#ffd23f}
+#help{position:fixed;bottom:8px;left:12px;font-size:13px;color:#fff;opacity:.6}</style></head><body>
+<div id="st"></div><div id="hud"></div><div id="think"></div><div id="center"></div><div id="help">スティック前=走る 後ろ=止まる 左右=曲がる / ペダル=走る / 引き金・スペース=ほえる / 親指ボタン・H=耳をすます(先生の声) / Z=スティック中央合わせ / F=全画面</div>
+<script src="three.min.js"></script>
+<script src="GLTFLoader.js"></script>
+<script src="DRACOLoader.js"></script>
+<script src="input.js"></script>
+<script>
+const OWNER=(typeof __OWNER__==='undefined')?1:__OWNER__;
+const STANDALONE=location.protocol==='file:';
+const WATCH=location.pathname==='/watch'||location.search.includes('watch'); // 観戦用(操作しない・席を動かさない)
+let t={pitch:0,roll:0,yaw:0},cur={pitch:0,roll:0,yaw:0},gain=0.35,st={};
+H3Input.load();
+const R=(a,b)=>a+Math.random()*(b-a),pick=a=>a[Math.floor(Math.random()*a.length)];
+
+// ===== 土台 =====
+const renderer=new THREE.WebGLRenderer({antialias:true,preserveDrawingBuffer:true});renderer.setPixelRatio(Math.min(2,devicePixelRatio));
+document.body.appendChild(renderer.domElement);
+const scene=new THREE.Scene();scene.background=new THREE.Color(0x8ec5f0);scene.fog=new THREE.Fog(0x8ec5f0,120,380);
+const camera=new THREE.PerspectiveCamera(70,1,0.1,1500);
+function rs(){renderer.setSize(innerWidth,innerHeight);camera.aspect=innerWidth/innerHeight;camera.updateProjectionMatrix()}addEventListener('resize',rs);rs();
+const hemi=new THREE.HemisphereLight(0xddeeff,0x554433,1.0);scene.add(hemi);
+const sun=new THREE.DirectionalLight(0xfff0dd,0.9);sun.position.set(-50,80,30);scene.add(sun);
+
+// ===== 絵(キャンバスで作る模様) =====
+function canvasTex(w,h,draw){const cv=document.createElement('canvas');cv.width=w;cv.height=h;const g=cv.getContext('2d');draw(g,w,h);const tx=new THREE.CanvasTexture(cv);tx.anisotropy=8;tx.encoding=THREE.sRGBEncoding;return tx}
+function windowsTex(hue){return canvasTex(128,256,(g,w,h)=>{g.fillStyle=`hsl(${hue},18%,12%)`;g.fillRect(0,0,w,h);
+ for(let y=6;y<h;y+=12)for(let x=6;x<w;x+=14){const on=Math.random()<.55;g.fillStyle=on?`hsla(${pick([40,45,200,30])},80%,${R(60,85)}%,${R(.5,.95)})`:'#141826';g.fillRect(x,y,9,7)}})}
+function signTexBig(text){const tx=canvasTex(512,128,(g,w,h)=>{g.fillStyle='rgba(10,10,30,.85)';g.fillRect(0,0,w,h);g.strokeStyle='#ffd23f';g.lineWidth=8;g.strokeRect(4,4,w-8,h-8);
+ g.font='bold '+Math.min(80,Math.floor(900/text.length))+'px "Hiragino Sans",sans-serif';g.textAlign='center';g.textBaseline='middle';g.fillStyle='#fff';g.shadowColor='#ffd23f';g.shadowBlur=16;g.fillText(text,w/2,h/2+4)});return tx}
+function signTex(text,color,bg){return (canvasTex(256,64,(g,w,h)=>{g.fillStyle=bg||'#000';g.fillRect(0,0,w,h);g.font='bold '+Math.min(48,Math.floor(400/Math.max(4,text.length)))+'px "Hiragino Sans",sans-serif';g.textAlign='center';g.textBaseline='middle';
+ g.shadowColor=color;g.shadowBlur=24;g.fillStyle=color;g.fillText(text,w/2,h/2+1);g.shadowBlur=0;g.fillStyle='#fff';g.globalAlpha=.5;g.fillText(text,w/2,h/2+1)}))}
+const glow=(c)=>new THREE.MeshBasicMaterial({color:c});
+// ===== マイクラ風: AI(Gemini)が描いたブロック模様 tex_*.png を読む。無ければ手作りのドット模様 =====
+const loader=new THREE.TextureLoader();
+function px(tx){tx.magFilter=THREE.NearestFilter;tx.minFilter=THREE.NearestFilter;tx.generateMipmaps=false;tx.encoding=THREE.sRGBEncoding;tx.wrapS=tx.wrapT=THREE.RepeatWrapping;return tx}
+function dots(n,cols){return canvasTex(n,n,(g)=>{for(let y=0;y<n;y++)for(let x=0;x<n;x++){g.fillStyle=pick(cols);g.fillRect(x,y,1,1)}})}
+function aiTex(name,fallback){const tx=px(fallback);loader.load('tex_'+name+'.png?'+Date.now(),img=>{tx.image=img.image;tx.needsUpdate=true});return tx}
+function winDots(base,lit){return canvasTex(16,16,(g)=>{g.fillStyle=base;g.fillRect(0,0,16,16);for(let y=2;y<16;y+=5)for(let x=2;x<16;x+=5){g.fillStyle=Math.random()<.5?lit:'#111';g.fillRect(x,y,3,3)}})}
+const WALLS=['wall_concrete','wall_glass','wall_brick','wall_tile','wall_pink'].map((n,i)=>aiTex(n,winDots(['#555','#123','#622','#a98','#525'][i],['#fd8','#8ef','#fc7','#fd8','#f8f'][i])));
+const ROOF=aiTex('roof',dots(16,['#666','#6a6a6a','#5c5c5c']));
+const ASPH=aiTex('asphalt',dots(16,['#2b2b30','#303036','#26262a','#34343a']));
+const WALK=aiTex('sidewalk',dots(16,['#8a8790','#7d7a84','#94919a']));
+const BRONZE=aiTex('bronze',dots(8,['#7a5a38','#8a6a44','#6a4c30','#5f7a50']));
+const ADIMG=[1,2,3].map(i=>{const im=new Image();im.src='tex_ad'+i+'.png?'+Date.now();return im});
+
+// ===== 動く大画面(QFRONT など) =====
+const screens=[];
+function bigScreen(w,h,seed){const cv=document.createElement('canvas');cv.width=512;cv.height=Math.round(512*h/w);const tx=new THREE.CanvasTexture(cv);tx.encoding=THREE.sRGBEncoding;
+ const m=new THREE.Mesh(new THREE.PlaneGeometry(w,h),new THREE.MeshBasicMaterial({map:tx}));screens.push({cv,g:cv.getContext('2d'),tx,seed});return m}
+const ADS=[['SHIBUYA','#ff3d8b'],['渋谷','#3df0ff'],['NEW MUSIC','#ffd23f'],['HACHIKO','#ff8a2a'],['SCRAMBLE','#7cff6b'],['TOKYO','#b28bff']];
+function drawScreens(time){for(const s of screens){const {g,cv}=s,w=cv.width,h=cv.height,k=Math.floor(time/4+s.seed)%ADS.length,[txt,col]=ADS[k],ph=(time/4+s.seed)%1;
+ const gr=g.createLinearGradient(0,0,w,h);gr.addColorStop(0,`hsl(${(time*30+s.seed*90)%360},70%,25%)`);gr.addColorStop(1,`hsl(${(time*30+s.seed*90+120)%360},80%,12%)`);g.fillStyle=gr;g.fillRect(0,0,w,h);
+ for(let i=0;i<6;i++){g.fillStyle=`hsla(${(i*60+time*50)%360},90%,60%,.25)`;g.beginPath();g.arc((i*97+time*60*(i%2?1:-1))%w,h*(.2+.12*i),h*.25,0,7);g.fill()}
+ g.font=`900 ${h*.38}px "Hiragino Sans",sans-serif`;g.textAlign='center';g.textBaseline='middle';g.fillStyle=col;g.shadowColor=col;g.shadowBlur=30;g.globalAlpha=Math.min(1,ph*6,(1-ph)*6);
+ g.fillText(txt,w/2+(ph-.5)*w*.15,h/2);g.globalAlpha=1;g.shadowBlur=0;s.tx.needsUpdate=true}}
+
+// ===== 地面: 道路・歩道・横断歩道 =====
+const ROAD=12; // 道の半分の幅
+const ground=new THREE.Mesh(new THREE.PlaneGeometry(1200,1200),new THREE.MeshLambertMaterial({color:0x2a2b33}));ground.rotation.x=-Math.PI/2;scene.add(ground);
+const walkMat=new THREE.MeshLambertMaterial({color:0x56535c});
+for(const sx of[-1,1])for(const sz of[-1,1]){const m=new THREE.Mesh(new THREE.BoxGeometry(300,.2,300),walkMat);m.position.set(sx*(ROAD+150),.1,sz*(ROAD+150));scene.add(m)}
+const stripe=new THREE.MeshLambertMaterial({color:0xe8e8ee});
+function zebra(cx,cz,alongX,len,width){for(let k=-len/2;k<len/2;k+=1.8){const g=new THREE.BoxGeometry(alongX?.9:width,.04,alongX?width:.9);const m=new THREE.Mesh(g,stripe);m.position.set(alongX?cx+k:cx,.03,alongX?cz:cz+k);scene.add(m)}}
+zebra(0,-ROAD-3,true,2*ROAD,5);zebra(0,ROAD+3,true,2*ROAD,5);zebra(-ROAD-3,0,false,2*ROAD,5);zebra(ROAD+3,0,false,2*ROAD,5);
+for(const s of[1,-1]){const grp=new THREE.Group();for(let k=-14;k<14;k+=1.8){const m=new THREE.Mesh(new THREE.BoxGeometry(.9,.04,5),stripe);m.position.set(k,.03,0);grp.add(m)}grp.rotation.y=s*Math.PI/4;scene.add(grp)}
+// 中央線・停止線
+const yel=new THREE.MeshLambertMaterial({color:0xd9a520});
+for(const [x,z,w,d] of[[0,-60,.3,80],[0,60,.3,80],[-60,0,80,.3],[60,0,80,.3]]){const m=new THREE.Mesh(new THREE.BoxGeometry(w,.03,d),yel);m.position.set(x,.03,z);scene.add(m)}
+
+// ===== 建物 =====
+const solids=[]; // ぶつかり判定 [x1,z1,x2,z2]
+function building(x,z,w,d,h,opt={}){return new THREE.Mesh();const base=opt.wall??pick(WALLS);
+ const side=(len)=>{const tx=base.clone();tx.repeat.set(Math.max(1,Math.round(len/4)),Math.max(1,Math.round(h/4)));tx.needsUpdate=true;
+  const m=new THREE.MeshLambertMaterial({map:tx,emissive:0xffffff,emissiveMap:tx,emissiveIntensity:.35});base.addEventListener&&0;return m};
+ const top=new THREE.MeshLambertMaterial({map:ROOF});
+ const mats=[side(d),side(d),top,top,side(w),side(w)];
+ // 読み込みが後から終わっても複製に反映する
+ const upd=()=>{for(const m of mats)if(m.map&&m.map!==ROOF){m.map.image=base.image;m.map.needsUpdate=true}};setTimeout(upd,1500);setTimeout(upd,5000);setTimeout(upd,15000);
+ const m=new THREE.Mesh(new THREE.BoxGeometry(w,h,d),mats);m.position.set(x,h/2,z);scene.add(m);solids.push([x-w/2,z-d/2,x+w/2,z+d/2]);return m}
+let SIGNS=[];const SIGNM=[];function sign(text,color,x,y,z,ry,w=12){SIGNS.push({text,x,z,ry});const m=new THREE.Mesh(new THREE.PlaneGeometry(w,w/4),new THREE.MeshBasicMaterial({map:signTex(text,color),transparent:true}));m.position.set(x,y,z);m.rotation.y=ry;scene.add(m);SIGNM.push(m);return m}
+function screenAt(x,y,z,ry,w,h,seed){const m=bigScreen(w,h,seed);m.position.set(x,y,z);m.rotation.y=ry;scene.add(m);SIGNM.push(m);return m}
+const toC=(x,z)=>Math.atan2(-x,-z); // 交差点の中心を向く角度
+
+// 北西: QFRONT(ガラス+大画面)
+{const q=new THREE.Mesh(new THREE.BoxGeometry(30,36,30),[WALLS[1],WALLS[1],ROOF,ROOF,WALLS[1],WALLS[1]].map(t=>{const c=t.clone();c.repeat.set(8,9);setTimeout(()=>{c.image=t.image;c.needsUpdate=true},4000);return new THREE.MeshLambertMaterial({map:c,emissive:0xffffff,emissiveMap:c,emissiveIntensity:.35})}));
+ q.position.set(-35,18,-35);(()=>0)(q);solids.push([-50,-50,-18,-18]);
+ screenAt(-24.5,22,-24.5,toC(-24.5,-24.5),22,13,0);sign('QFRONT','#ffffff',-24,6,-24,toC(-24,-24),10);sign('TSUTAYA','#2f8cff',-24,33,-24,toC(-24,-24),12)}
+// 北東: MAGNET by SHIBUYA109
+building(36,-34,30,28,30,{hue:280});screenAt(22.4,18,-26,Math.PI/2*-1+Math.PI,0.1,0.1,0);
+screenAt(36,20,-19.9,0,22,12,2);sign('MAGNET by SHIBUYA109','#ff4fa0',36,32,-19.8,0,22);
+// 北: センター街の入口アーチ
+{const arch=new THREE.Group();const pole=new THREE.MeshLambertMaterial({color:0x333344});
+ for(const sx of[-1,1]){const p=new THREE.Mesh(new THREE.BoxGeometry(.6,9,.6),pole);p.position.set(sx*5,4.5,0);arch.add(p)}
+ const top=new THREE.Mesh(new THREE.PlaneGeometry(11,2.6),new THREE.MeshBasicMaterial({map:signTex('センター街','#ffd23f','#1a0f2a')}));top.position.set(0,8.6,.35);arch.add(top);
+ arch.position.set(-58,0,-16);arch.rotation.y=Math.PI/2;(()=>0)(arch)}
+// 南: 渋谷駅(ハチ公口)と高架
+building(-10,48,80,24,16,{hue:30,color:0xccbbaa});sign('渋谷駅 ハチ公口','#ffffff',-10,12,35.9,0,24);sign('JR','#3df06b',-40,13,35.9,0,6);
+{const track=new THREE.Mesh(new THREE.BoxGeometry(400,3,10),new THREE.MeshLambertMaterial({color:0x555560}));track.position.set(0,12,64);(()=>0)(track)}
+// 南東: 渋谷スクランブルスクエア(高い塔)
+{const tw=building(52,52,34,34,230,{hue:210});const crown=new THREE.Mesh(new THREE.BoxGeometry(36,4,36),glow(0x88ccff));crown.position.set(52,231,52);(()=>0)(crown)}
+sign('SHIBUYA SCRAMBLE SQUARE','#88ccff',52,40,34.8,0,30);
+// 西: 道玄坂の先に 109 の筒
+{const t109=new THREE.Mesh(new THREE.CylinderGeometry(9,9,50,8),new THREE.MeshLambertMaterial({color:0xaaaab8,emissive:0x222230,flatShading:true}));t109.position.set(-150,25,-8);(()=>0)(t109);solids.push([-159,-17,-141,1]);
+ const s=sign('109','#ffffff',-140.5,44,-8,Math.PI/2,14)}
+// 残りのビル(雑居ビルとネオン)
+const NEON=['カラオケ','ラーメン','居酒屋','ドラッグ','BAR','パチンコ','牛丼','CAFE','ゲーム','焼肉','古着','24H'];
+const COLS=['#ff3d8b','#3df0ff','#ffd23f','#7cff6b','#ff8a2a','#b28bff'];
+function street(x0,z0,dx,dz,n,side){for(let i=0;i<n;i++){const x=x0+dx*i,z=z0+dz*i,w=R(10,14),h=R(14,44);
+ const bx=dz?x+side*w/2:x,bz=dx?z+side*w/2:z;if(solids.some(s=>bx>s[0]-6&&bx<s[2]+6&&bz>s[1]-6&&bz<s[3]+6))continue;
+ building(bx,bz,dz?w:dx*.95,dx?w:dz*.95,h);
+ const face=dz?(side>0?-Math.PI/2:Math.PI/2):(side>0?Math.PI:0),fx=dz?bx-side*(w/2+.15):bx,fz=dx?bz-side*(w/2+.15):bz;
+ const s=sign(pick(NEON),pick(COLS),fx,R(5,h-4),fz,face,7);
+ if(Math.random()<.35)screenAt(fx,h*.6,fz,face,Math.abs(dx||dz)*.7,7,i)}}
+street(-30,-ROAD-14,-13,0,9,-1);street(-30,ROAD+40,-13,0,9,1);   // 西(道玄坂・文化村方面)
+street(30,-ROAD-14,13,0,9,-1);street(80,ROAD+14,13,0,6,1);       // 東(宮益坂方面)
+street(-ROAD-14,-60,0,-13,8,-1);street(ROAD+14,-60,0,-13,8,1);   // 北(センター街・公園通り方面)
+// 街灯と信号
+function lamp(x,z){const p=new THREE.Mesh(new THREE.CylinderGeometry(.12,.12,6),new THREE.MeshLambertMaterial({color:0x444455}));p.position.set(x,3,z);scene.add(p);
+ const b=new THREE.Mesh(new THREE.SphereGeometry(.35),glow(0xfff2c0));b.position.set(x,6.1,z);scene.add(b)}
+for(const sx of[-1,1])for(const sz of[-1,1]){lamp(sx*(ROAD+1),sz*(ROAD+7));lamp(sx*(ROAD+7),sz*(ROAD+1))}
+const sigs=[];for(const sx of[-1,1])for(const sz of[-1,1]){const box=new THREE.Mesh(new THREE.BoxGeometry(.6,1.4,.4),new THREE.MeshLambertMaterial({color:0x222222}));box.position.set(sx*(ROAD+1.5),3.4,sz*(ROAD+1.5));scene.add(box);
+ const l=new THREE.Mesh(new THREE.CircleGeometry(.2,16),glow(0x38e07b));l.position.set(sx*(ROAD+1.5),3.6,sz*(ROAD+1.5)-sz*.21);if(sz<0)l.rotation.y=Math.PI;scene.add(l);sigs.push(l)}
+// 空: AIの夜景(読めなければ月だけ)
+{const sk=px(new THREE.Texture());loader.load('tex_sky.png?'+Date.now(),t=>{sk.image=t.image;sk.needsUpdate=true;skyM.visible=true});sk.repeat.set(3,1);
+ const skyM=new THREE.Mesh(new THREE.CylinderGeometry(600,600,500,24,1,true),new THREE.MeshBasicMaterial({map:sk,side:THREE.BackSide,fog:false}));skyM.position.y=200;skyM.visible=false;scene.add(skyM)}
+// 空の月
+{const moon=new THREE.Mesh(new THREE.SphereGeometry(8),glow(0xfff6d8));moon.position.set(-200,180,-500)}
+
+// ===== 爆走ハチ公(背中にまたがって駆ける) =====
+const rider=new THREE.Group();scene.add(rider);rider.add(camera);
+const bronze=new THREE.MeshStandardMaterial({color:0x8a6a44,metalness:.55,roughness:.5,flatShading:true});
+const bronzeD=new THREE.MeshStandardMaterial({color:0x5e4630,metalness:.55,roughness:.5,flatShading:true});
+const dog=new THREE.Group();rider.add(dog);dog.scale.setScalar(1.5);
+function lp(geo,mat,x,y,z,rx=0,ry=0,rz=0,sx=1,sy=1,sz=1,parent=dog){const m=new THREE.Mesh(geo,mat);m.position.set(x,y,z);m.rotation.set(rx,ry,rz);m.scale.set(sx,sy,sz);parent.add(m);return m}
+{lp(new THREE.IcosahedronGeometry(.55,0),bronze,0,-.85,-.1,0,0,0,1,.8,1.6);            // 胴(ずんぐり)
+ lp(new THREE.DodecahedronGeometry(.4,0),bronze,0,-.85,-.75,0,0,0,1.15,1,1);            // 首まわりの毛(太く短い)
+ const head=new THREE.Group();head.position.set(0,-.62,-1.1);dog.add(head);dog.userData.head=head;
+ lp(new THREE.IcosahedronGeometry(.36,0),bronze,0,0,0,0,0,0,1.2,1,1,head);               // 丸い大きな顔
+ lp(new THREE.IcosahedronGeometry(.2,0),bronzeD,0,-.1,-.3,0,0,0,1,.75,1,head);           // 短い鼻づら
+ lp(new THREE.TetrahedronGeometry(.07,0),new THREE.MeshStandardMaterial({color:0x111111,flatShading:true}),0,-.06,-.48,0,0,0,1,1,1,head);
+ const eR=lp(new THREE.ConeGeometry(.14,.26,3),bronzeD,.24,.33,.05,0,0,-.3,1,1,.6,head); // 三角の耳(右は立つ)
+ const eL=lp(new THREE.ConeGeometry(.14,.26,3),bronzeD,-.3,.22,.05,0,0,1.1,1,1,.6,head); // 左は垂れる(ハチ公)
+ dog.userData.e1=eR;dog.userData['e-1']=eL;
+ for(const sx of[-1,1])lp(new THREE.CylinderGeometry(.12,.1,.8,5),bronzeD,sx*.3,-1.35,-.6,0,0,0,1,1,1)}  // 前脚
+dog.add(new THREE.PointLight(0xffd9a0,.7,5));
+camera.position.set(0,0,0);
+
+const LM=[[35.65958,139.69866,'SHIBUYA109','道玄坂と大和田の分かれ道(坂の下の追分、茶屋が並ぶ)'],
+ [35.65905,139.70065,'渋谷駅前(ハチ公口)','渋谷の停車場の駅前(木造の小さな駅舎、人力車が客を待つ)'],
+ [35.65987,139.70032,'QFRONT(TSUTAYA)','宇田川へ下りていく道の角(八百屋と米屋の角)'],
+ [35.66010,139.69990,'センター街入口','宇田川のほとり(小川と田んぼ、水車小屋)'],
+ [35.65935,139.70250,'宮益坂下','宮益坂の下、渋谷川にかかる宮益橋のたもと'],
+ [35.65840,139.70220,'渋谷スクランブルスクエア','渋谷川の東の岸(田んぼと水車、駅の裏手)'],
+ [35.66100,139.70030,'西武渋谷・公園通り','代々木の練兵場へ向かう道(兵隊さんが行進していく)']]
+ .map(([la,lo,now,old])=>({x:(lo-139.70055)*90430,z:-(la-35.6595)*110950,now,old,text:now}));
+// ===== PLATEAU(国交省の3D都市モデル・渋谷区 LOD1)を 2m ブロックにしたもの =====
+let OCC=null,PG=2,PH=320;
+function occAt(x,z){if(!OCC)return 0;const i=Math.floor((x+PH)/PG),j=Math.floor((-z+PH)/PG);return OCC.get(i*100000+j)||0}
+const plMat=(tex)=>{const m=new THREE.ShaderMaterial({fog:true,uniforms:THREE.UniformsUtils.merge([THREE.UniformsLib.fog,{map:{value:null},roof:{value:null}}]),
+ vertexShader:`#include <common>
+#include <fog_pars_vertex>
+varying vec3 vW;varying vec3 vN;
+void main(){vec4 wp=modelMatrix*instanceMatrix*vec4(position,1.0);vW=wp.xyz;vN=normal;vec4 mvPosition=viewMatrix*wp;gl_Position=projectionMatrix*mvPosition;
+#include <fog_vertex>
+}`,
+ fragmentShader:`#include <common>
+#include <fog_pars_fragment>
+uniform sampler2D map;uniform sampler2D roof;varying vec3 vW;varying vec3 vN;
+void main(){vec3 c;float l;
+ if(abs(vN.y)>.5){c=texture2D(roof,vW.xz/4.0).rgb;l=.55;}
+ else{vec2 uv=abs(vN.x)>.5?vec2(vW.z,vW.y):vec2(vW.x,vW.y);c=texture2D(map,uv/4.0).rgb;l=abs(vN.x)>.5?.9:1.0;}
+ gl_FragColor=vec4(c*l*1.15,1.0);
+#include <fog_fragment>
+}`});m.uniforms.map.value=tex;m.uniforms.roof.value=ROOF;return m};
+fetch('plateau_shibuya.json').then(r=>r.json()).then(d=>{PG=d.g;PH=d.half;OCC=new Map();
+ for(const [x,z,h] of d.cols){const i=Math.floor((x+PH)/PG),j=Math.floor((-z+PH)/PG);OCC.set(i*100000+j,h)}
+ fetch('plateau_shibuya.bin').then(r=>r.arrayBuffer()).then(buf=>{const pos=new Float32Array(buf);const geo=new THREE.BufferGeometry();
+  geo.setAttribute('position',new THREE.BufferAttribute(pos,3));geo.computeVertexNormals();
+  const mat=new THREE.ShaderMaterial({fog:true,side:THREE.DoubleSide,uniforms:THREE.UniformsLib.fog,
+   vertexShader:`#include <common>
+#include <fog_pars_vertex>
+varying vec3 vW;varying vec3 vN;
+void main(){vec4 wp=modelMatrix*vec4(position,1.0);vW=wp.xyz;vN=normal;vec4 mvPosition=viewMatrix*wp;gl_Position=projectionMatrix*mvPosition;
+#include <fog_vertex>
+}`,
+   fragmentShader:`#include <common>
+#include <fog_pars_fragment>
+varying vec3 vW;varying vec3 vN;
+float h1(vec2 p){return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453);}
+void main(){vec3 n=normalize(vN);vec3 c;
+ if(n.y>.6){c=vec3(.20,.20,.24);}
+ else{float u=abs(n.x)>abs(n.z)?vW.z:vW.x;vec2 cell=vec2(floor(u/2.6),floor(vW.y/3.4));vec2 f=vec2(fract(u/2.6),fract(vW.y/3.4));
+  float bld=h1(floor(vec2(vW.x,vW.z)/18.0));
+  vec3 wall=mix(vec3(.16,.17,.22),vec3(.30,.27,.26),bld);
+  float win=step(.18,f.x)*step(f.x,.82)*step(.25,f.y)*step(f.y,.8)*step(1.5,vW.y);
+  float lit=step(.45,h1(cell+floor(vW.xz/40.0)));
+  vec3 wc=mix(vec3(.06,.08,.12),mix(vec3(1.,.85,.55),vec3(.7,.9,1.),step(.7,bld)),lit);
+  c=mix(wall,wc,win)*(abs(n.x)>abs(n.z)?.85:1.);
+  c+=vec3(.25,.1,.3)*smoothstep(10.,0.,vW.y)*.4;}
+ gl_FragColor=vec4(c,1.0);
+#include <fog_fragment>
+}`});
+  const m=new THREE.Mesh(geo,mat);m.frustumCulled=false;scene.add(m);window.LOD1=m;loadLOD2()});
+ // 看板と大画面を本物の壁に付け直す
+ for(const m of SIGNM)scene.remove(m);SIGNS=[];screens.length=0;
+ const cand=[];
+ for(const [x,z,h] of d.cols){const r=Math.hypot(x,z);if(r<18||r>140||h<3)continue;
+  for(const [dx,dz,ry] of[[1,0,Math.PI/2],[-1,0,-Math.PI/2],[0,1,0],[0,-1,Math.PI]]){if(!occAt(x+dx*PG,z+dz*PG)&&!occAt(x+dx*PG*3,z+dz*PG*3))cand.push({x:x+dx*(PG/2+.15),z:z+dz*(PG/2+.15),ry,h,r})}}
+ cand.sort(()=>Math.random()-.5);
+ const used=[];let nS=0,nB=0;
+ for(const c of cand){if(used.some(u=>Math.hypot(u.x-c.x,u.z-c.z)<9))continue;used.push(c);
+  if(nB<6&&c.r<70&&c.h>=10){screenAt(c.x,Math.min(c.h*PG-5,24),c.z,c.ry,9,5.4,nB);nB++;
+   // 大画面は壁一枚より大きく見せたいので横に並べる
+   continue}
+  if(nS<70){sign(pick(NEON),pick(COLS),c.x,R(4,Math.min(c.h*PG-2,14)),c.z,c.ry,4.5);nS++}}
+ for(const L of LM){let best=null,bd=1e9;for(const c of cand){const d=Math.hypot(c.x-L.x,c.z-L.z);if(d<bd){bd=d;best=c}}
+  if(best){const t=new THREE.Mesh(new THREE.PlaneGeometry(14,3.5),new THREE.MeshBasicMaterial({map:signTexBig(L.now),transparent:true}));t.position.set(best.x,Math.min(best.h*PG-2,10),best.z);t.rotation.y=best.ry;scene.add(t)}}
+ // ハチ公はハチ公像の場所から
+ for(const [x,z] of[[8,46],[5,40],[0,30],[0,20]]){if(!occAt(x,z)){P.x=x;P.z=z;break}}
+ document.getElementById('st').dataset.pl='PLATEAU '+d.cols.length+'本';
+});
+
+// ===== 時間帯: 昼 → 夕方 → 日暮れ(=時間切れ) =====
+const L2MATS=[];const SKY=[[0,new THREE.Color(0x8ec5f0),1.0],[.6,new THREE.Color(0xa8c4e0),.95],[.8,new THREE.Color(0xf2a35e),.8],[.93,new THREE.Color(0xc0566a),.55],[1,new THREE.Color(0x231c44),.3]];
+const sunBall=new THREE.Mesh(new THREE.SphereGeometry(14,16,12),new THREE.MeshBasicMaterial({color:0xfff2c0,fog:false}));scene.add(sunBall);
+function setDay(p){let i=0;while(i<SKY.length-2&&p>SKY[i+1][0])i++;const [p0,c0,l0]=SKY[i],[p1,c1,l1]=SKY[i+1],k=Math.min(1,Math.max(0,(p-p0)/(p1-p0)));
+ const c=c0.clone().lerp(c1,k),l=l0+(l1-l0)*k;scene.background.copy(c);scene.fog.color.copy(c);
+ for(const m of L2MATS)m.color.copy(m.userData.base).multiplyScalar(l).lerp(new THREE.Color(0xff9a50),Math.max(0,(p-.7)/.3)*.25*l);
+ hemi.intensity=.35+l*.8;sun.intensity=l*.9;sun.color.setHSL(.1,1,.6+.3*(1-p));
+ const ang=.9-p*1.05;sunBall.position.set(-400*Math.cos(.6),Math.sin(ang)*420-20,-400);sunBall.material.color.setHSL(.12-.1*p,1,.75-.2*p);
+ if(window.LOD1)LOD1.visible=LOD1.visible&&L2MATS.length===0}
+
+// ===== PLATEAU LOD2(本物の写真が貼られた建物) =====
+function loadLOD2(){const gl=new THREE.GLTFLoader();const dr=new THREE.DRACOLoader();dr.setDecoderPath('');dr.setDecoderConfig({type:'js'});gl.setDRACOLoader(dr);
+ const lon=139.70055*Math.PI/180,lat=35.6595*Math.PI/180,a=6378137,e2=6.69437999014e-3,N=a/Math.sqrt(1-e2*Math.sin(lat)**2);
+ const O=new THREE.Vector3(N*Math.cos(lat)*Math.cos(lon),N*Math.cos(lat)*Math.sin(lon),N*(1-e2)*Math.sin(lat));
+ const E=new THREE.Vector3(-Math.sin(lon),Math.cos(lon),0),Nn=new THREE.Vector3(-Math.sin(lat)*Math.cos(lon),-Math.sin(lat)*Math.sin(lon),Math.cos(lat)),U=new THREE.Vector3(Math.cos(lat)*Math.cos(lon),Math.cos(lat)*Math.sin(lon),Math.sin(lat));
+ // ECEF → (東, 上, 南) 、地面の高さ 51.6m を 0 に
+ const M=new THREE.Matrix4().set(E.x,E.y,E.z,-E.dot(O), U.x,U.y,U.z,-U.dot(O)-51.6, -Nn.x,-Nn.y,-Nn.z,Nn.dot(O), 0,0,0,1);
+ const Y=new THREE.Matrix4().set(1,0,0,0, 0,0,-1,0, 0,1,0,0, 0,0,0,1); // glTF(y上)→ECEF(z上)
+ fetch('l2_manifest.json').then(r=>r.json()).then(list=>{let n=0;for(const t of list){gl.load(t.f,g=>{
+   const T=new THREE.Matrix4().makeTranslation(t.rtc[0],t.rtc[1],t.rtc[2]);const W=M.clone().multiply(T).multiply(Y);
+   g.scene.matrixAutoUpdate=false;g.scene.matrix.copy(W);
+   g.scene.traverse(o=>{if(o.isMesh){o.frustumCulled=false;const mm=o.material;if(mm){o.material=new THREE.MeshBasicMaterial({map:mm.map||null,color:mm.map?0xb8b8c0:0x777788,fog:true,side:THREE.DoubleSide});o.material.userData.base=new THREE.Color(mm.map?0xffffff:0x9a9aa8);L2MATS.push(o.material);if(o.material.map)o.material.map.encoding=THREE.sRGBEncoding}}});
+   scene.add(g.scene);n++;if(n>=list.length*.5&&window.LOD1)window.LOD1.visible=false},undefined,e=>console.warn(e))}})}
+
+// ===== 人(ブロックの通行人)と、飼い主の上野先生 =====
+const HATS={なし:null,黒い:0x222222,茶色い:0x7a4a22,白い:0xeeeeee,赤い:0xcc2222};
+const COATS={黒い:0x2a2a2a,灰色の:0x888888,紺の:0x22305a,茶色い:0x6b4423,緑の:0x2f6b3a,赤い:0xb02a2a};
+const ITEMS=['なし','傘','かばん','新聞'];
+let people=[],owner=null,mode='title',timer=0,LIMIT=90,sniffs=0,thinking=false,result='';
+function personMesh(o){const g=new THREE.Group();const M=c=>new THREE.MeshLambertMaterial({color:c});
+ const add=(w,h,d,x,y,z,c)=>{const m=new THREE.Mesh(new THREE.BoxGeometry(w,h,d),M(c));m.position.set(x,y,z);g.add(m);return m};
+ g.userData.legs=[add(.25,.8,.25,-.15,.4,0,0x222233),add(.25,.8,.25,.15,.4,0,0x222233)];
+ add(.6,.8,.35,0,1.2,0,COATS[o.coat]);add(.42,.42,.42,0,1.82,0,0xe9c4a4);
+ if(HATS[o.hat])add(.5,.16,.5,0,2.08,0,HATS[o.hat]);
+ if(o.item==='傘'){add(.05,1,.05,.42,1.4,0,0x333333);add(1.1,.08,1.1,.42,1.95,0,0x4466cc)}
+ if(o.item==='かばん')add(.18,.35,.4,-.42,1.0,0,0x5a3a1a);
+ if(o.item==='新聞')add(.35,.45,.05,.3,1.25,-.25,0xdddddd);
+ if(o.glasses)add(.44,.08,.05,0,1.86,-.22,0x111111);
+ scene.add(g);return g}
+function roadPoint(){for(let k=0;k<40;k++){const a=R(0,6.283),r=R(5,90),p={x:Math.cos(a)*r,z:Math.sin(a)*r};if(!occAt(p.x,p.z)&&!occAt(p.x+1.5,p.z)&&!occAt(p.x-1.5,p.z)&&!occAt(p.x,p.z+1.5)&&!occAt(p.x,p.z-1.5))return p}return{x:R(-10,10),z:R(-10,10)}}
+function newRound(){for(const p of people)scene.remove(p.mesh);people=[];
+ const oa={hat:pick(Object.keys(HATS).filter(k=>k!=='なし')),coat:pick(Object.keys(COATS)),item:pick(ITEMS),glasses:Math.random()<.5};
+ const near=pick(LM);
+ for(let i=0;i<55;i++){const o={hat:Math.random()<.4?pick(Object.keys(HATS)):'なし',coat:pick(Object.keys(COATS)),item:Math.random()<.6?'なし':pick(ITEMS),glasses:Math.random()<.3};
+  if(i<10){Object.assign(o,oa);const k=pick(['hat','coat','item']);const pool=k==='hat'?Object.keys(HATS):k==='coat'?Object.keys(COATS):ITEMS;let v;do v=pick(pool);while(v===oa[k]);o[k]=v}
+  const a=roadPoint();o.x=a.x;o.z=a.z;o.t=roadPoint();o.sp=R(1,1.8);o.ph=R(0,6);o.mesh=personMesh(o);people.push(o)}
+ owner={...oa,owner:true,sp:.4,ph:0,sign:near};
+ {let bx=near.x,bz=near.z;outer:for(let r=0;r<40;r+=1.5)for(let k=0;k<16;k++){const x=near.x+Math.cos(k/16*6.283)*r,z=near.z+Math.sin(k/16*6.283)*r;if(!occAt(x,z)&&!occAt(x+1,z)&&!occAt(x-1,z)&&!occAt(x,z+1)&&!occAt(x,z-1)){bx=x;bz=z;break outer}}
+  owner.x=bx;owner.z=bz;owner.hx=bx;owner.hz=bz;owner.t={x:bx,z:bz};owner.area=near}
+ owner.mesh=personMesh(owner);people.push(owner);
+ for(const [x,z] of(near.now.startsWith('渋谷駅')?[[0,-10],[0,0]]:[[8,46],[5,40],[0,30],[0,20]])){if(!occAt(x,z)){P.x=x;P.z=z;break}}P.a=near.now.startsWith('渋谷駅')?Math.PI:0;P.v=0;P.w=0;timer=LIMIT;sniffs=0;result='';mode='play';
+ think('先生の声がする…どこかに。 (耳をすまして探そう)');setTimeout(()=>sniff(true),400)}
+let thinkT=0;function think(t){const el=document.getElementById('think');el.textContent='🐕 '+t;el.style.display='block';el.style.left='50%';el.style.fontSize='24px';thinkT=8}
+function where(){const dx=owner.x-P.x,dz=owner.z-P.z,d=Math.hypot(dx,dz);
+ let ang=Math.atan2(-dx,-dz)-P.a;ang=Math.atan2(Math.sin(ang),Math.cos(ang));
+ const dir=Math.abs(ang)<.5?'正面':Math.abs(ang)>2.4?'真後ろ':ang>0?(ang>1.3?'左':'左ななめ前'):(ang<-1.3?'右':'右ななめ前');
+ const lm=owner.area.now;
+ return{d:Math.round(d),dir,lm}}
+// 大正の渋谷(先生が知っている渋谷)と今の対応
+function oldArea(x,z){
+ if(z>20&&x<30)return{now:'渋谷駅・ハチ公口',old:'渋谷の停車場(小さな木造の駅舎。ハチが毎夕迎えに来た改札)'};
+ if(x>25&&z>15)return{now:'スクランブルスクエアの足もと',old:'渋谷川のほとり(駅の東を流れる川、水車や橋があった)'};
+ if(x>25)return{now:'宮益坂のほう',old:'宮益坂(御嶽神社のある坂、坂の上から富士山が見えた)'};
+ if(x<-25&&z<-5&&z>-30)return{now:'道玄坂・109のほう',old:'道玄坂(大和田の坂道、茶屋や夜店が並ぶ)'};
+ if(x<-20&&z<-20)return{now:'センター街・宇田川町',old:'宇田川のほとり(小川と田んぼ、水車小屋)'};
+ if(z<-25)return{now:'公園通り・神南のほう',old:'代々木の練兵場へ向かう道(兵隊さんが行進する野原の道)'};
+ return{now:'スクランブル交差点のまんなか',old:'大きな辻(道が交わる広場、人力車の溜まり場)'}}
+function sniff(first){if(mode!=='play'||thinking)return;thinking=true;sniffs++;if(!first){timer-=3;bump=.4}
+ const w=where(),o=owner,ar=owner.area;
+ const prompt=first?`あなたは大正時代の東京帝大教授・上野英三郎。愛犬ハチに話しかけている。あなたは今の渋谷を知らない(大正の渋谷しか知らない)。
+今日のあなたの姿: ${o.hat}帽子、${o.coat}コート、持ち物=${o.item}${o.glasses?'、眼鏡':''}。
+ハチに「わしはこんな格好じゃ」と1文で伝える。特徴のうち2つだけ、大正らしい言い回しで(例: コート→外套、帽子→中折れ帽、かばん→鞄、眼鏡→ロイド眼鏡)。40字以内、絵文字なし、穏やかな老紳士の口調。JSONで {"msg":"..."}`
+:`あなたは大正時代の東京帝大教授・上野英三郎。愛犬ハチを呼んでいる。あなたは今の渋谷を知らず、大正の渋谷の地名と景色でしか場所を言えない。
+あなたが今いる場所は、大正の渋谷でいう「${ar.old}」にあたる。周りには見たこともない高い建物と光る看板が並んでいて、あなたは戸惑っている。
+ハチに居場所を伝える1文を言う。大正の地名か景色を必ず入れる。今の地名・建物名(センター街・109・QFRONT・西武・スクランブルスクエア等)は絶対に言わない。${sniffs>=3?'自分の格好の特徴も1つ入れる(大正の言い回しで)。':''}45字以内、絵文字なし、穏やかな老紳士の口調、「ハチや」で始める。JSONで {"msg":"..."}`;
+ const local=first?`ハチや、わしは${o.coat}外套に${o.hat}中折れ帽じゃよ`:`ハチや、わしは${ar.old.split('(')[0]}におるよ`;
+ const my=owner;const say=m=>{thinking=false;if(my!==owner)return;voice(m,first?null:w)};
+ if(STANDALONE){say(local);return}
+ fetch('/ai',{method:'POST',body:JSON.stringify({prompt,json:true})}).then(r=>r.json()).then(j=>{let m=null;try{m=JSON.parse((j.text.match(/\{[^{}]*\}/)||[''])[0])}catch(e){}say(m&&m.msg?m.msg:local)}).catch(()=>say(local))}
+// 先生の声: 聞こえる向き(左右)と大きさ(遠い/近い)を吹き出しで表す
+function voice(m,w){const el=document.getElementById('think');el.textContent='🎩 '+m;el.style.display='block';thinkT=9;
+ let left='50%',size=24,tag='';
+ if(w){left=w.dir.includes('左')?'28%':w.dir.includes('右')?'72%':'50%';size=w.d<15?32:w.d<45?26:19;tag=w.dir==='真後ろ'?'(うしろから聞こえる)':w.d<15?'(すぐ近くで聞こえる)':w.d>60?'(遠くからかすかに)':''}
+ el.style.left=left;el.style.fontSize=size+'px';if(tag)el.textContent+=' '+tag}
+let bump=0;
+function bark(){if(mode!=='play'){newRound();return}
+ bump=.6;let best=null,bd=1e9;
+ for(const p of people){const dx=p.x-P.x,dz=p.z-P.z,d=Math.hypot(dx,dz);let ang=Math.atan2(-dx,-dz)-P.a;ang=Math.atan2(Math.sin(ang),Math.cos(ang));if(d<7&&Math.abs(ang)<.7&&d<bd){bd=d;best=p}}
+ if(!best){think('ワン！ (だれもいない…)');return}
+ if(best.owner){mode='win';result=`残り${Math.max(0,timer).toFixed(0)}秒で再会！ においをかいだ回数 ${sniffs}回`}
+ else{timer-=8;best.scare=1.5;think('ワン！…ちがう人だった (−8秒)')}}
+function updPeople(dt,time){for(const p of people){
+  if(p.owner){if(Math.hypot(p.t.x-p.x,p.t.z-p.z)<.3)p.t={x:p.hx+R(-3,3),z:p.hz+R(-3,3)}}
+  else if(Math.hypot(p.t.x-p.x,p.t.z-p.z)<1)p.t=roadPoint();
+  const dx=p.t.x-p.x,dz=p.t.z-p.z,d=Math.hypot(dx,dz)||1,sp=p.sp*(p.scare>0?3:1);
+  const nx=p.x+dx/d*sp*dt,nz=p.z+dz/d*sp*dt;
+  if(occAt(nx,nz)){if(!p.owner)p.t=roadPoint()}else{p.x=nx;p.z=nz}
+  if(p.scare>0)p.scare-=dt;
+  // ハチ公に押される
+  const ox=p.x-P.x,oz=p.z-P.z,od=Math.hypot(ox,oz);if(od<1.6){p.x+=ox/od*(1.6-od);p.z+=oz/od*(1.6-od);if(Math.abs(P.v)>4){bump=Math.max(bump,.5);P.v*=.5;p.scare=1}}
+  p.ph+=dt*6*sp;p.mesh.position.set(p.x,0,p.z);p.mesh.rotation.y=Math.atan2(dx,dz);
+  const sw=Math.sin(p.ph)*.5;p.mesh.userData.legs[0].rotation.x=sw;p.mesh.userData.legs[1].rotation.x=-sw}}
+
+// ===== 動き =====
+let bang=0;const P={x:-20,z:24,a:0,v:0,w:0,ph:0}; // ハチ公広場(南西の角)から北向きに出発
+const keys={};addEventListener('keydown',e=>{keys[e.key]=true;
+ if(e.key==='f'||e.key==='F'){document.fullscreenElement?document.exitFullscreen():document.documentElement.requestFullscreen()}
+ if((e.key==='z'||e.key==='Z')&&H3Input.centerAll)H3Input.centerAll();
+ if(WATCH)return;if(e.key===' '||e.key==='Enter')bark();if(e.key==='h'||e.key==='H')sniff(false)});addEventListener('click',()=>{if(!WATCH&&mode!=='play')bark()});
+let pb=[false,false];
+addEventListener('keyup',e=>keys[e.key]=false);
+let last=performance.now();
+function step(now){const dt=Math.min(.05,(now-last)/1000);last=now;const time=now/1000;
+ const v=H3Input.values();
+ let fwd=-(v.stick1_y||0),turn=(v.stick1_x||0);if(Math.abs(fwd)<.12)fwd=0;if(Math.abs(turn)<.12)turn=0;
+ const ped=Math.max(0,((v.brake_l||0)+(v.brake_r||0))/2);if(ped>.15)fwd=Math.max(fwd,ped);
+ if(keys.ArrowUp||keys.w)fwd=1;if(keys.ArrowDown||keys.s)fwd=-.5;if(keys.ArrowLeft||keys.a)turn=-1;if(keys.ArrowRight||keys.d)turn=1;
+ // 走り: 速い。曲がる量は速さしだい
+ if(WATCH){fwd=0;turn=0}
+ const on=b=>!!(b&&(b===true||b.pressed||b.value>.5));const bs1=H3Input.buttons('stick1'),bs2=H3Input.buttons('stick2');
+ // 引き金(0番)=ほえる、ほかのボタン=耳をすます。どちらのスティックでもよい
+ const b0=on(bs1[0])||on(bs2[0]),b1=bs1.slice(1).some(on)||bs2.slice(1).some(on);
+ if(!WATCH&&b0&&!pb[0])bark();if(!WATCH&&b1&&!pb[1]){if(mode!=='play')bark();else sniff(false)}pb=[b0,b1];
+ // スタート前・終了後は、スティックを前に倒すかペダルを踏んでもスタート
+ if(mode!==pb.m){pb.m=mode;pb.go=true}
+ if(mode!=='play'&&!WATCH){if((fwd>.6)&&!pb.go){pb.go=true;newRound()}if(fwd<.2)pb.go=false;fwd=0;turn=0}
+ const acc=((fwd>=0?fwd*22:fwd*8)-P.v);P.v+=acc*Math.min(1,dt*(fwd*P.v<0?3:1.2));
+ const steer=turn*(0.5+0.5*Math.min(1,Math.abs(P.v)/8));P.w+=(steer*1.4-P.w)*Math.min(1,dt*6);P.a-=P.w*dt;
+ let nx=P.x-Math.sin(P.a)*P.v*dt,nz=P.z-Math.cos(P.a)*P.v*dt;
+ let hit=0;{const fx=-Math.sin(P.a)*1.2,fz=-Math.cos(P.a)*1.2;if(occAt(nx+fx*Math.sign(P.v||1),nz+fz*Math.sign(P.v||1))||occAt(nx,nz)){nx=P.x;nz=P.z;hit=Math.abs(P.v);P.v*=-.25}}
+ if(hit>3)bang=Math.min(1.2,hit/12);
+ P.x=Math.max(-300,Math.min(300,nx));P.z=Math.max(-300,Math.min(300,nz));
+ if(WATCH&&SY.P){const q=SY.P,k2=Math.min(1,dt*10);P.x+=(q.x-P.x)*k2;P.z+=(q.z-P.z)*k2;let da=q.a-P.a;da=Math.atan2(Math.sin(da),Math.cos(da));P.a+=da*k2;P.v=q.v;P.w=q.w;timer=SY.timer;mode=SY.mode;result=SY.result||''}
+ // 足運び: 遅いと「歩き」、速いと「駆け足(ギャロップ)」。1歩ごとの周期で背中が跳ねる
+ const sp=Math.abs(P.v),k=Math.min(1,sp/18),walk=sp>.3?1:0;
+ const freq=walk?(1.2+sp*.12):0;P.ph+=freq*dt;
+ const c=P.ph*Math.PI*2;
+ const gallop=Math.max(0,Math.sin(c))**2;                 // 跳ねる瞬間
+ const bounce=(gallop-.4)*k + Math.sin(c*2)*.15*(1-k)*walk;  // 低速は小刻み、速いと大きく跳ねる
+ const rock=Math.sin(c+1.2)*(.6*k+.25*(1-k)*walk);         // 前後のあおり(馬の駆け足のゆりかご運動)
+ const sway=Math.sin(c*.5)*.25*walk*(1-k*.5);              // 左右の体重移動
+ rider.position.set(P.x,2.1+bounce*.35,P.z);rider.rotation.set(0,P.a,0);
+ camera.rotation.set(-.06+rock*.05,0,sway*.03+P.w*.04);camera.fov=70+k*12;camera.updateProjectionMatrix();
+ dog.rotation.x=rock*.06;dog.userData.head.rotation.set(-rock*.25,-turn*.25,0);
+ dog.userData.e1.rotation.x=-k*.8;
+ // 席: 生き物に乗っている感じ(前後にあおる+跳ねる+左右に揺れる)、曲がると内側へ傾く、ぶつかるとドン
+ t.pitch=rock*.8+bounce*.5-acc*.03;
+ t.roll=sway*1.2+P.w*Math.min(1,sp/10)*.6;
+ t.yaw=P.w*.35+Math.sin(c*.5)*.08*walk;
+ if(bump>0){t.pitch+=Math.sin(time*40)*bump*.6;bump-=dt*2}
+ if(mode==='win'){t.pitch=Math.sin(time*7)*.5;t.roll=Math.sin(time*3.5)*.4}
+ if(people.length&&!WATCH)updPeople(dt,time);
+ if(mode==='play'&&!WATCH){const before=timer;timer-=dt;if(before>30&&timer<=30)think('日が傾いてきた…急がなきゃ');if(before>12&&timer<=12)think('もうすぐ日が暮れる…！');if(timer<=0){mode='lose';result='日が暮れてしまった…先生は先に帰った'}}
+ setDay(mode==='play'?1-Math.max(0,timer)/LIMIT:mode==='lose'?1:mode==='win'?Math.min(.75,1-Math.max(0,timer)/LIMIT):0);
+ if(thinkT>0){thinkT-=dt;if(thinkT<=0)document.getElementById('think').style.display='none'}
+ document.getElementById('hud').textContent=mode==='play'?`のこり ${Math.max(0,timer).toFixed(0)}秒`:'';
+ const ce=document.getElementById('center');
+ const html=mode==='title'?`<div><b>爆走ハチ公</b><br>渋谷のどこかにいる飼い主・上野先生を探せ。<br>でも先生は大正時代の人。今の渋谷を知らないので、昔の渋谷の言葉で居場所を教えてくれる(AIの先生)。<br>耳をすますと先生の声。昔の地名が今のどこか、考えて走れ！<br>先生の前で「ほえる」と再会！ 人ちがいは −8秒<br><br>引き金・スティックを前・ペダルでスタート</div>`
+  :mode==='win'?`<div><b style="color:#7cff6b">先生、見つけた！</b><br>${result}<br>${owner.area?'先生の言う「'+owner.area.old.split('(')[0]+'」は、今の「'+owner.area.now+'」':''}<br><br>引き金 / スペースでもう一回</div>`
+  :mode==='lose'?`<div><b style="color:#ff6b6b">会えなかった…</b><br>${result}<br>先生は「${owner.area.now}」にいた<br>${owner.area?'先生の言う「'+owner.area.old.split('(')[0]+'」は、今の「'+owner.area.now+'」':''}<br><br>引き金 / スペースでもう一回</div>`:'';
+ if(ce.dataset.h!==html){ce.innerHTML=html;ce.dataset.h=html}
+ if(bang>0){t.pitch+=Math.sin(time*50)*bang;t.roll+=Math.cos(time*43)*bang*.7;bang-=dt*2}
+ for(const q in cur)cur[q]+=(Math.max(-1,Math.min(1,t[q]))-cur[q])*.25;
+ if(Math.floor(time*10)%2===0)drawScreens(time);
+ const g=Math.floor(time/20)%2===0;for(const l of sigs)l.material.color.setHex(g?0x38e07b:0xff4d5e);
+ renderer.render(scene,camera);
+ document.getElementById('st').textContent=(STANDALONE?'画面だけの版':st.connected?'● H3 接続中':'● H3 未接続')+`　スティック1 ${H3Input.devName('stick1')?'○':'×'} ペダル ${H3Input.devName('pedals')?'○':'×'}`;
+ requestAnimationFrame(step)}
+requestAnimationFrame(step);
+if(!STANDALONE&&!WATCH){setInterval(()=>fetch('/',{method:'POST',body:JSON.stringify({owner:OWNER,pitch:cur.pitch,roll:cur.roll,yaw:cur.yaw,gain})}).catch(()=>{}),1000/30);
+ setInterval(()=>fetch('/state').then(r=>r.json()).then(s=>st=s).catch(()=>{}),1000)}
+</script></body></html>
+<script>
+// ===== 観戦: プレイ中の画面 → /sync → 観戦ページ(同じ LAN の別PCのブラウザで http://<このMac>:8891/watch) =====
+var SY={};let syRid=-1,rid=0;
+const _nr=newRound;newRound=function(){_nr();rid++};
+if(!STANDALONE&&!WATCH)setInterval(()=>{if(!people.length&&mode==='title'){fetch('/sync',{method:'POST',body:JSON.stringify({mode,rid})}).catch(()=>{});return}
+ const th=document.getElementById('think');
+ fetch('/sync',{method:'POST',body:JSON.stringify({rid,mode,timer,result,P:{x:P.x,z:P.z,a:P.a,v:P.v,w:P.w},
+  attrs:people.map(p=>({hat:p.hat,coat:p.coat,item:p.item,glasses:p.glasses,owner:!!p.owner})),ppl:people.map(p=>[+p.x.toFixed(2),+p.z.toFixed(2),+(p.mesh.rotation.y).toFixed(2),p.scare>0?1:0]),
+  area:owner&&owner.area?{now:owner.area.now,old:owner.area.old}:null,
+  think:th.style.display==='block'?{t:th.textContent,l:th.style.left,f:th.style.fontSize}:null,hud:document.getElementById('hud').textContent,center:document.getElementById('center').innerHTML})}).catch(()=>{})},66);
+// 画面そのものを写真にして送る(モニター用)
+let frameBusy=false;if(!STANDALONE&&!WATCH)setInterval(()=>{if(frameBusy)return;frameBusy=true;renderer.domElement.toBlob(b=>{if(!b){frameBusy=false;return}fetch('/frame',{method:'POST',body:b}).catch(()=>{}).finally(()=>frameBusy=false)},'image/jpeg',.72)},70);
+if(WATCH){document.getElementById('help').textContent='観戦中(この画面からは操作できません)';
+ setInterval(()=>fetch('/sync').then(r=>r.json()).then(d=>{SY=d;
+  if(d.attrs&&d.rid!==syRid){syRid=d.rid;for(const p of people)scene.remove(p.mesh);people=[];
+   d.attrs.forEach((a,i)=>{const o={...a,x:d.ppl[i][0],z:d.ppl[i][1],ph:0,sp:1.3};o.mesh=personMesh(o);people.push(o);if(a.owner)owner=o})}
+  if(d.ppl)d.ppl.forEach((q,i)=>{const p=people[i];if(!p)return;p.tx=q[0];p.tz=q[1];p.ry=q[2]});
+  if(owner&&d.area)owner.area=d.area;
+  const th=document.getElementById('think');if(d.think){th.textContent=d.think.t;th.style.left=d.think.l;th.style.fontSize=d.think.f;th.style.display='block';thinkT=1}else th.style.display='none';
+ }).catch(()=>{}),66);
+ // 通行人をなめらかに動かす
+ (function anim(){for(const p of people){if(p.tx===undefined)continue;const dx=p.tx-p.x,dz=p.tz-p.z;p.x+=dx*.2;p.z+=dz*.2;p.ph+=Math.hypot(dx,dz)*2;
+  p.mesh.position.set(p.x,0,p.z);p.mesh.rotation.y=p.ry;const sw=Math.sin(p.ph)*.5;p.mesh.userData.legs[0].rotation.x=sw;p.mesh.userData.legs[1].rotation.x=-sw}requestAnimationFrame(anim)})();
+}
+</script>
